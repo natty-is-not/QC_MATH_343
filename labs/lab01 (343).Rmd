@@ -1,0 +1,668 @@
+---
+title: "Practice Assignment 1 MATH 343"
+author: "Natasha Watson"
+output: pdf_document
+date: "March 2"
+---
+
+This practice assignment is coupled to the theory assignment (the problem numbers align herein) and should be worked on concomitantly.
+
+You should have R and RStudio (latest versions) installed to edit this file. You will write code in places marked "TO-DO" to complete the problems. Most of this will be a pure programming assignment but there are some questions that instead ask you to "write a few sentences" which are not R chunks.
+
+The tools for solving these problems can be found in the class demos located [here](https://github.com/kapelner/QC_MATH_343_Spring_2024/tree/main/demos). I prefer you to follow the methods from these examples. If you google and find esoteric code you don't understand or if you use chat GPT, this doesn't do you too much good in the long run.
+
+To "hand in" the homework, you should follow the github repo setup instructions on the course homepage. Once you have your own class repo e.g. located in ~, make a /labs directory. Then go back to ~ and clone the class repo. Then copy this file into your repo/labs directory. Edits made there can be committed and pushed. You must push this completed file by the due date to avoid late penalties.
+
+This lab requires the following packages. You should make sure they load before beginning:
+
+```{r}
+pacman::p_load(ggplot2, survival, optimx)
+pacman::p_load(MCMCpack)
+```
+
+## Problem 1: Gibbs Sampler
+
+Problem 3 in the theory homework assumes a normal change point model. We will make up some data and visualize it using a scatterplot:
+
+```{r}
+set.seed(1)
+n = 50
+
+true_theta_1 = 3
+true_theta_2 = 6
+true_sigsq_1 = 1.5
+true_sigsq_2 = 0.5
+true_theta_3 = 37
+
+x = c(rnorm(true_theta_3, true_theta_1, sqrt(true_sigsq_1)), rnorm(n - true_theta_3, true_theta_2, sqrt(true_sigsq_2)))
+
+ggplot(data.frame(t = 1 : n, x = x)) + 
+  geom_point(aes(x = t, y = x))
+```
+
+Imagine you are looking at this dataset of counts for the first time (i.e. forget that we generated the data ourselves). Why do you think the model is appropriate?
+
+The model is appropriate because it shows a clear change from the first normal distribution to the second normal distribution, where in this case, the indexed position of change is theta_3 = 37
+
+We will now implement the Gibbs sampler given what you derived in the theoretical assignment. You found that I've provided some boilerplate code from the class demos below. It is your job to do the sampling.
+
+```{r}
+num_tot_samples = 1e4
+theta_3s = array(NA, num_tot_samples)
+theta_1s = array(NA, num_tot_samples)
+sigsq_1s = array(NA, num_tot_samples)
+theta_2s = array(NA, num_tot_samples)
+sigsq_2s = array(NA, num_tot_samples)
+
+n = length(x)
+
+###initialize thetas to be null values
+theta_3s[1] = floor(n/2)
+#null change point happpens halfway through n-samples; let theta_3 be indexed at n/2
+theta_1s[1] = mean(x[1:theta_3s[1]])
+#theta_1s are ordered up until the theta_3 change point
+theta_2s[1] = mean(x[(theta_3s[1] +1):n])
+#theta_2s are ordered at the first index right after the change point up until the nth sample, it is expected that all the theta_2s will come after the change point because all the theta_2s are from the second normal
+sigsq_1s[1] = var(x[1:theta_3s[1]])
+sigsq_2s[1] = var(x[(theta_3s[1] + 1):n])
+#same idea for the variances
+
+```
+
+
+```{r}
+# Number of total samples
+num_tot_samples <- 1e4
+
+# Storage for the sampled parameters
+theta_3s <- array(NA, num_tot_samples)
+theta_1s <- array(NA, num_tot_samples)
+sigsq_1s <- array(NA, num_tot_samples)
+theta_2s <- array(NA, num_tot_samples)
+sigsq_2s <- array(NA, num_tot_samples)
+
+# Data input (assuming x is given)
+n <- length(x)
+
+# Initialize parameters
+theta_3s[1] <- floor(n / 2)
+theta_1s[1] <- mean(x[1:theta_3s[1]], na.rm = TRUE)
+theta_2s[1] <- mean(x[(theta_3s[1] + 1):n], na.rm = TRUE)
+sigsq_1s[1] <- var(x[1:theta_3s[1]], na.rm = TRUE)
+sigsq_2s[1] <- var(x[(theta_3s[1] + 1):n], na.rm = TRUE)
+
+# Prior parameters
+mu0 <- mean(x, na.rm = TRUE)
+tau0_sq <- var(x, na.rm = TRUE)
+alpha0 <- 2
+beta0 <- var(x, na.rm = TRUE)
+
+# Gibbs sampler loop
+for (t in 2:num_tot_samples) {
+  # Sample theta_1
+  n1 <- theta_3s[t-1]
+  x_bar1 <- mean(x[1:n1], na.rm = TRUE)
+  post_mean1 <- (mu0/tau0_sq + n1*x_bar1/sigsq_1s[t-1]) / (1/tau0_sq + n1/sigsq_1s[t-1])
+  post_var1 <- 1 / (1/tau0_sq + n1/sigsq_1s[t-1])
+  theta_1s[t] <- rnorm(1, mean = post_mean1, sd = sqrt(post_var1))
+
+  # Sample theta_2
+  n2 <- n - n1
+  x_bar2 <- mean(x[(n1 + 1):n], na.rm = TRUE)
+  post_mean2 <- (mu0/tau0_sq + n2*x_bar2/sigsq_2s[t-1]) / (1/tau0_sq + n2/sigsq_2s[t-1])
+  post_var2 <- 1 / (1/tau0_sq + n2/sigsq_2s[t-1])
+  theta_2s[t] <- rnorm(1, mean = post_mean2, sd = sqrt(post_var2))
+
+  # Sample sigsq_1
+  alpha1 <- alpha0 + n1 / 2
+  beta1 <- beta0 + sum((x[1:n1] - theta_1s[t])^2, na.rm = TRUE) / 2
+  sigsq_1s[t] <- 1 / rgamma(1, shape = alpha1, rate = beta1)
+
+  # Sample sigsq_2
+  alpha2 <- alpha0 + n2 / 2
+  beta2 <- beta0 + sum((x[(n1 + 1):n] - theta_2s[t])^2, na.rm = TRUE) / 2
+  sigsq_2s[t] <- 1 / rgamma(1, shape = alpha2, rate = beta2)
+
+  # Sample theta_3
+  theta_3s[t] <- sample(2:(n-1), 1)  # Uniform prior for simplicity
+}
+
+# Output sampled values
+list(theta_1 = theta_1s, theta_2 = theta_2s, sigsq_1 = sigsq_1s, sigsq_2 = sigsq_2s, theta_3 = theta_3s)
+
+```
+
+
+Now we aggregate all three chains together for convenience:
+
+```{r}
+gibbs_chain = data.frame(
+  theta_3 = theta_3s,
+  theta_1 = theta_1s, 
+  sigsq_1 = sigsq_1s,
+  theta_2 = theta_2s, 
+  sigsq_2 = sigsq_2s,
+  t = 1 : num_tot_samples
+)
+#rm(theta_1s, theta_2s, theta_3s, sigsq_2s, sigsq_1s                                                                                           )
+```
+
+
+We now assess convergence using plots. Feel free to play around with the `max_t_for_plotting` to get a better visual on the beginning of the chains.
+
+```{r}
+max_t_for_plotting = 8000
+ggplot(gibbs_chain) +
+  geom_point(aes(x = t, y = theta_1)) + 
+  xlim(0, max_t_for_plotting)
+ggplot(gibbs_chain) +
+  geom_point(aes(x = t, y = theta_2)) + 
+  xlim(0, max_t_for_plotting)
+ggplot(gibbs_chain) +
+  geom_point(aes(x = t, y = theta_3)) + 
+  xlim(0, max_t_for_plotting)
+ggplot(gibbs_chain) +
+  geom_point(aes(x = t, y = sigsq_1)) + 
+  xlim(0, max_t_for_plotting)
+ggplot(gibbs_chain) +
+  geom_point(aes(x = t, y = sigsq_2)) + 
+  xlim(0, max_t_for_plotting)
+#cleanup
+rm(max_t_for_plotting)
+```
+
+Where do we burn?
+burn 10 percent
+
+```{r}
+t_burn_in = floor(0.1 * num_tot_samples)
+```
+
+Now we burn:
+
+```{r}
+gibbs_chain = list(
+  theta_1 = theta_1s[(t_burn_in + 1):num_tot_samples],
+  theta_2 = theta_2s[(t_burn_in + 1):num_tot_samples],
+  sigsq_1 = sigsq_1s[(t_burn_in + 1):num_tot_samples],
+  sigsq_2 = sigsq_2s[(t_burn_in + 1):num_tot_samples],
+  theta_3 = theta_3s[(t_burn_in + 1):num_tot_samples]
+)
+
+```
+
+Now we assess autocorrelation. Play with the `ell_max` and `r_max` to get the best assessment possible:
+
+```{r}
+par(mfrow = c(1, 1), mar = c(2, 2, 1, 1))
+ell_max = 5
+r_max = 1.5
+acf(gibbs_chain$theta_1, 
+    xlim = c(0, ell_max + 10), ylim = c(0, r_max), lag.max = ell_max)
+acf(gibbs_chain$theta_2, 
+    xlim = c(0, ell_max + 10), ylim = c(0, r_max), lag.max = ell_max)
+acf(gibbs_chain$theta_3, 
+    xlim = c(0, ell_max + 10), ylim = c(0, r_max), lag.max = ell_max)
+acf(gibbs_chain$sigsq_1, 
+    xlim = c(0, ell_max + 10), ylim = c(0, r_max), lag.max = ell_max)
+acf(gibbs_chain$sigsq_2, 
+    xlim = c(0, ell_max + 10), ylim = c(0, r_max), lag.max = ell_max)
+#cleanup
+rm(ell_max, r_max)
+```
+
+Where do we thin?
+
+Let's do t = 5 to be safe
+```{r}
+t_thin = 5
+```
+
+Now we thin:
+
+Select every 5th sample
+```{r}
+gibbs_chain = list(
+  theta_1 = gibbs_chain$theta_1[seq(1, length(gibbs_chain$theta_1), by = t_thin)],
+  theta_2 = gibbs_chain$theta_2[seq(1, length(gibbs_chain$theta_2), by = t_thin)],
+  sigsq_1 = gibbs_chain$sigsq_1[seq(1, length(gibbs_chain$sigsq_1), by = t_thin)],
+  sigsq_2 = gibbs_chain$sigsq_2[seq(1, length(gibbs_chain$sigsq_2), by = t_thin)],
+  theta_3 = gibbs_chain$theta_3[seq(1, length(gibbs_chain$theta_3), by = t_thin)]
+)
+```
+
+How many iid samples do we have after burning and thinning?
+
+```{r}
+#compute by formulka
+num_iid_samples = (num_tot_samples - t_burn_in) / t_thin
+
+#print
+num_iid_samples
+```
+
+What would we change in the above code so we could've had more iid samples?
+
+We would either have to sample more or descrease the thinning/burn-in values
+
+Before we do inference, we first source the convenience function we used in class:
+
+```{r}
+visualize_chain_and_compute_estimates_and_cr = function(
+    samples, 
+    plot_mmse = TRUE, #blue
+    plot_mmae = TRUE, #orange
+    true_value = NULL, #green
+    alpha = NULL, #ci in red
+    bins = 30,
+    colors = c("blue", "orange", "green", "red")){
+  ggplot_obj = ggplot(data.frame(samples = samples)) +
+    geom_histogram(aes(x = samples), bins = bins)
+  
+  mmse = mean(samples) 
+  mmae = median(samples) 
+  if (plot_mmse){
+    ggplot_obj = ggplot_obj + geom_vline(xintercept = mmse, col = colors[1])
+  }
+  
+  if (plot_mmae){
+    ggplot_obj = ggplot_obj + geom_vline(xintercept = mmae, col = colors[2])
+  }
+  
+  if (!is.null(true_value)){
+    ggplot_obj = ggplot_obj + 
+      geom_vline(xintercept = true_value, col = colors[3]) 
+  }
+  if (!is.null(alpha)){
+    ggplot_obj = ggplot_obj + 
+      geom_vline(xintercept = quantile(samples, .025), col = colors[4]) + 
+      geom_vline(xintercept = quantile(samples, .975), col = colors[4])
+  }
+  plot(ggplot_obj)
+  
+  ret = list(
+    mmse = mmse,
+    mmae = mmae,
+    theta = true_value
+  )
+  if (!is.null(alpha)){
+    ret$cr_one_minus_alpha_theta = c(
+        quantile(samples, alpha / 2), 
+        quantile(samples, 1 - alpha / 2)
+      )
+  }
+  ret
+}
+
+```
+
+Now we do inference on all three parameters:
+
+```{r}
+visualize_chain_and_compute_estimates_and_cr(gibbs_chain$theta_3, true_value = true_theta_3, alpha = 0.05)
+```
+
+How accurate was our inference on this parameter (the change point)?
+
+It looks pretty off, mmae off by -9 and mmse off by -11
+
+```{r}
+visualize_chain_and_compute_estimates_and_cr(gibbs_chain$theta_1, true_value = true_theta_1, alpha = 0.05)
+```
+
+How accurate was our inference on this parameter (the first mean)?
+
+not as bad, mmae is 3.3, mmse is 3.25 and theta is 3
+
+```{r}
+visualize_chain_and_compute_estimates_and_cr(gibbs_chain$theta_2, true_value = true_theta_2, alpha = 0.05)
+```
+
+How accurate was our inference on this parameter (the second mean)?
+A little off, MMSE 4.8, MMAE 4.57 and true theta = 6
+
+
+```{r}
+visualize_chain_and_compute_estimates_and_cr(gibbs_chain$sigsq_1, true_value = true_sigsq_1, alpha = 0.05)
+```
+
+How accurate was our inference on this parameter (the first variance)?
+Pretty accurate here
+
+```{r}
+visualize_chain_and_compute_estimates_and_cr(gibbs_chain$sigsq_2, true_value = true_sigsq_2, alpha = 0.05)
+```
+
+How accurate was our inference on this parameter (the second variance)?
+
+Very off
+
+Now we do inference manually from the chain itself.
+
+Find the MMSE and the MMAE for theta_1
+
+```{r}
+mmse_theta_1 = mean(gibbs_chain$theta_1)
+mmae_theta_1 = median(gibbs_chain$theta_1)
+mmse_theta_1
+mmae_theta_1
+```
+
+Find a 95\% CR for theta_2
+
+```{r}
+cr_theta_2 = quantile(gibbs_chain$theta_2, probs = c(0.025, 0.975))
+cr_theta_2
+```
+
+Test H_a: theta_3 < 25.
+
+```{r}
+#posterior prob P(theta_3 < 25)
+p_theta3 = mean(gibbs_chain$theta_3 < 25)
+p_theta3
+```
+Reject null
+Masters students only: test H_a: sigsq_1 < sigsq_2.
+
+```{r}
+#TO-DO
+```
+
+
+## Problem 2: The Permutation Test
+
+We will analyze the anorexia dataset in MASS. You can read about it here:
+
+```{r}
+rm(list = ls())
+?MASS::anorexia
+D = MASS::anorexia
+```
+
+The data is measured on 72 people before and after treatment. We are interested in the outcome of percentage change in weight. So we first create that variable:
+
+```{r}
+D$y = (D$Postwt - D$Prewt) / D$Prewt
+```
+
+We will be interested in if there's a different between the two treatment groups: cognitive behavioral treatment (CBT) vs family treatment (FT). So we separate the two datasets now:
+
+```{r}
+x1 = D$y[D$Treat == "FT"]
+x2 = D$y[D$Treat == "CBT"]
+x = c(x1, x2)
+n1 = length(x1)
+n2 = length(x2)
+rm(D)
+```
+
+How many possible ways are there to "permute" the dataset into two groups
+
+```{r}
+num_permutations = choose(n1 + n2, n1)
+num_permutations
+```
+
+Is it possible to run this many permutations? Yes / no
+I think not - that's about 1.79 trillion
+
+Instead let's run `B = 100,000`. Pick a test statistic and compute the test statistic for all  
+
+```{r}
+
+test_stat = function(samp1, samp2){
+  #use the mean
+  return(mean(samp1) - mean(samp2))
+}
+
+#perform permutations
+B = 1e5
+x_ind = 1 : (n1 + n2)
+thetahathat_b = array(NA, B)
+for (b in 1 : B){
+  permutex = sample(x)
+  x_1b = permutex[1:n1] #n1 to grp 1
+  x_2b = permutex[(n1 +1):(n1 + n2)] 
+  thetahathat_b[b] = test_stat(x_1b, x_2b)
+}
+thetahathat_b
+```
+
+Now compute the test stat for the real data
+
+```{r}
+thetahathat = test_stat(x1, x2)
+thetahathat
+```
+
+Declare the alpha value
+
+```{r}
+alpha = 0.05
+```
+
+Now run the two-sided test for difference in DGP at level alpha
+
+```{r}
+# Compute the critical values from the empirical null distribution
+ret = quantile(thetahathat_b, probs = c(0.05/2, 1 - 0.05/2))
+ret
+```
+
+What is the conclusion of the test?
+
+We just barely retain the null
+
+Calculate the p-value of this test.
+
+```{r}
+#find p value
+pval = mean(abs(thetahathat_b) >= abs(thetahathat))
+pval 
+```
+
+## Problem 3: The Bootstrap
+
+Set the number of bootstrap samples to be `B = 100,000`.
+
+```{r}
+B = 1e5
+```
+
+Use the bootstrap to create a 95% CI for `theta := Med[X_2]` where X_2 is defined as the DGP of the population of weight increases for the CBT group. 
+
+```{r}
+thetahathat_b = array(NA, B)
+for (b in 1 : B){
+  x2_b = sample(x2, size = length(x2), replace = TRUE)
+  thetahathat_b[b] = median(x2_b)
+}
+
+#CI
+bootstrap_CI_median = quantile(thetahathat_b, probs = c(0.025, 0.975))
+bootstrap_CI_median
+```
+
+Use the bootstrap to test H_a: theta is nonzero where theta is defined as above.
+
+```{r}
+reta = quantile(thetahathat_b, probs = c(0.025, 0.975))
+reta
+```
+retainment at alpha = 5% = [-0.0036, 0.0299], therefore we retain null
+
+Use the bootstrap to create a 95% CI for `theta := Q[X_2, 0.2]` i.e. the 20th percentile where X_2 is defined as before.
+
+```{r}
+thetahathat_b = array(NA, B)
+for (b in 1 : B){
+  x2_b = sample(x2, size = length(x2), replace = TRUE)
+  thetahathat_b[b] = quantile(x2_b, probs = 0.2)
+}
+bootstrap_CI_20 = quantile(thetahathat_b, probs = c(0.025, 0.975))
+bootstrap_CI_20
+```
+
+Use the bootstrap to test H_a: theta is nonzero where theta is defined as above.
+
+```{r}
+retain = quantile(thetahathat_b, probs = c(0.025, 0.975))
+retain
+```
+Retain null
+
+## Problem 4: Parametric Survival using the Weibull iid DGP
+
+Let's look at the lung dataset's survival by sex. We'll recode their censoring variable to match the definition from class. Group 1 is male and group 2 is female. The values are sorted.
+
+```{r}
+rm(list = ls())
+is_male = 1 - (survival::lung$sex - 1) #zero is female, one is male
+y_1 = survival::lung$time[is_male == 1]
+c_1 = 1 - (survival::lung$status[is_male == 1] - 1)
+y_2 = survival::lung$time[is_male == 0]
+c_2 = 1 - (survival::lung$status[is_male == 0] - 1)
+rm(is_male)
+```
+
+Using what you derived one the homework, for an iid Weibull DGP with no censoring, write a function that takes in the vector of survival times y and returns the values of the maximum likeliheood estimates of `k` and `lambda`. You'll need to call the `optimx` function within.
+
+```{r}
+library(optimx)
+
+mle_weibull_iid_compute = function(y){
+  # Negative log-likelihood function for Weibull
+  weibull_neg_loglik = function(params, y){
+    k = params[1]
+    lambda = params[2]
+    
+    if (k <= 0 || lambda <= 0) return(Inf)  # Ensure parameters are positive
+    
+    n = length(y)
+    log_likelihood = n * log(k) - n * k * log(lambda) + (k - 1) * sum(log(y)) - sum((y / lambda)^k)
+    
+    return(-log_likelihood)  # Negative for min
+  }
+  
+  # Initialize parameter 
+  k_init = 1  
+  lambda_init = mean(y)  
+  
+  # Run optimization\
+  mle_results = optimx(
+    par = c(k_init, lambda_init),  # Initial values
+    fn = weibull_neg_loglik,  #minimize
+    y = y, 
+    method = "L-BFGS-B",  
+    lower = c(0.01, 0.01)  
+  )
+  
+  # Extract MLE estimates
+  k_mle = mle_results$par[1]
+  lambda_mle = mle_results$par[2]
+  return(list(k = k_mle, lambda = lambda_mle))
+}
+```
+Pretend there is no censoring and find the maximum likelihood estimates of `k` and `lambda` for female survival times (group 2 only). 
+
+```{r}
+mles = mle_weibull_iid_compute(y_2)
+mles$k
+mles$lambda
+```
+
+Using the maximum likelihood estimates of `k` and `lambda`, compute the maximum likelihood estimate of the mean for female survival times (group 2 only).
+
+```{r}
+1 / mles$lambda * gamma(1 + 1 / mles$k)
+```
+
+
+Using what you derived one the homework for the setting where there is censoring at all different times given by the indices where `c_2 = 1`, find the MLE's of `k` and `lambda` for female survival times (group 2 only). You'll need the `optimx` function.
+
+```{r}
+library(optimx)
+
+#compute mle's
+mle_weibull_censored_compute = function(y, c){
+  # neg log-likelihood 
+  weibull_neg_loglik = function(params, y, c){
+    k = params[1]
+    lambda = params[2]
+    
+    if (k <= 0 || lambda <= 0) return(Inf)  
+    
+    # Identify uncensored observations
+    uncensored_idx = which(c == 1)  
+    y_uncensored = y[uncensored_idx]  
+
+    n1 = length(y_uncensored)  #num of uncensored
+    
+    #log-likelihoodfxn
+    log_likelihood = n1 * log(k) + n1 * k * log(lambda) + (k - 1) * sum(log(y_uncensored)) - lambda^k * sum(y^k)
+    
+    return(-log_likelihood)  # Negative for minimization
+  }
+  
+  #initial param guesses
+  k_init = 1.0  
+  lambda_init = mean(y[c == 1]) 
+  
+  # Run optimization using optimx
+  mle_results = optimx(
+    par = c(k_init, lambda_init), 
+    fn = weibull_neg_loglik, 
+    y = y, 
+    c = c,
+    method = "L-BFGS-B", 
+    lower = c(0.01, 0.01)  
+  )
+
+  #estimates
+  k_mle = mle_results$p1  
+  lambda_mle = mle_results$p2
+
+  return(list(k = k_mle, lambda = lambda_mle))
+}
+
+
+mles = mle_weibull_censored_compute(y_2, c_2)
+mles$k      # Estimated shape parameter
+mles$lambda # Estimated scale parameter
+
+```
+
+
+## Problem 5: Nonparametric Survival
+
+For this problem, you'll need to read up on how to use the `survival` package as the solutions will all be one liners.
+
+Trace out the Kaplan-Meier survival distribution estimate for female survival times (group 2 only).
+
+```{r}
+plot(survfit(Surv(y_2, c_2) ~ 1), main = "K-M (Females)", 
+     xlab = "Time", ylab = "Survival Probability", col = "red", lwd = 2)
+```
+
+Estimate median survival for females.
+
+```{r}
+med = summary(survfit(Surv(y_2, c_2) ~ 1))$table["median"]
+med
+```
+
+Run the log rank test to attempt to prove male and female survival are different.
+
+```{r}
+log_rank_test = survdiff(Surv(survival::lung$time, 1 - (survival::lung$status - 1)) ~ survival::lung$sex)
+log_rank_test
+```
+Test stat >> 3.84 -> reject null
+
+Masters students only: run a bootstrap test at level 5% attempting to prove male and female median survival are different.
+
+```{r}
+#TO-DO
+```
+
