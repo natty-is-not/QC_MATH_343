@@ -1,0 +1,688 @@
+---
+title: "Practice Assignment 3 MATH 343"
+author: "Natasha Watsi=on"
+output: pdf_document
+date: "noon May 19"
+---
+
+## Problem 1: Bayesian Inference for Negative Binomial Regression using Hamiltonian MCMC with the no U-Turn Sampler via Stan
+
+We first generate the data according to a negative binomial model with a mean which is log-linear in the covariate:
+
+```{r}
+pacman::p_load(ggplot2)
+
+set.seed(1)
+n = 50
+
+true_beta_0 = 1.23
+true_beta_1 = 2.34
+true_r = 3.45
+
+x = sort(runif(n, 0, 1))
+y = rnbinom(n, mu = exp(true_beta_0 + true_beta_1 * x), size = true_r)
+
+ggplot(data.frame(y = y, x = x)) + 
+  geom_point(aes(x = x, y = y))
+```
+
+Now we do this exercise with `stan`.You should also make sure stan works by running the following code before proceeding. If this doesn't work and you're on Windows, you need to install R build tools (see https://cran.r-project.org/bin/windows/Rtools/). On MAC or Linix, start googling the error message.
+
+```{r}
+example(stan_model, package = "rstan", run.dontrun = TRUE)
+```
+
+If the above worked, you will see no red errors and a whole bunch of output ending with something like:
+
+Chain 4: 
+Chain 4:  Elapsed Time: 0.031 seconds (Warm-up)
+Chain 4:                0.032 seconds (Sampling)
+Chain 4:                0.063 seconds (Total)
+Chain 4: 
+
+Now that we know stan works, we first create the list of data which is passed into stan:
+
+```{r}
+stan_model_data = list(y = y, x = x, n = n)
+```
+
+Now we write the relevant stan code below as a string (no need for a separate .stan file). I've started by specifying the data block. For the parameters block, you'll need your answer from 5(a) on the theoretical homework (which specifies the parameter spaces). For the model block, you'll need the log of the posterior's kernel from 5(c) on the theoretical homework. The log of the gamma function can be called via `lgamma` in stan.
+
+```{r}
+stan_model_code = "
+  data {
+    int<lower=0> n; //the sample size
+    vector[n] x;    //the covariate value for each sample
+    vector[n] y;    //the response count for each sample
+  }
+  
+  parameters {
+    real beta_0; //intcpt
+    real beta_1; //slope
+    real<lower=0> r; //nuisance param 0 - infty
+  }
+  
+  model {
+  vector[n] mu;
+  
+  for(i in 1:n){
+     mu[i] = exp(beta_0 + beta_1 * x[i]);
+
+      target += lgamma(y[i] + r)
+              - lgamma(r)
+              - lgamma(y[i] + 1)
+              + r * log(r)
+              + y[i] * log(mu[i])
+              - (r + y[i]) * log(r + mu[i]);
+  }
+  }
+"
+```
+
+Cache the stan object which will run the sampler
+
+```{r}
+stan_mod_obj = stan_model(model_code = stan_model_code, model_name = "negbin_regression_model")
+```
+
+Now we sample the model using a seed so the results will be the same for all students:
+
+```{r}
+stan_fit = rstan::sampling(
+  stan_mod_obj,
+  seed = 1,
+  data = stan_model_data,
+  iter = 5000
+)
+```
+
+Now we do inference on all three parameters:
+
+```{r}
+visualize_chain_and_compute_estimates_and_cr = function(chain, true_value = NULL, alpha = 0.05) {
+  library(ggplot2)
+  
+  # Summary statistics
+  est_mean <- mean(chain)
+  ci_lower <- quantile(chain, alpha / 2)
+  ci_upper <- quantile(chain, 1 - alpha / 2)
+  
+  # Create data frame for plotting
+  df <- data.frame(value = chain, index = 1:length(chain))
+  
+  # Traceplot
+  p_trace <- ggplot(df, aes(x = index, y = value)) +
+    geom_line(alpha = 0.6) +
+    geom_hline(yintercept = est_mean, color = "blue", linetype = "dashed", size = 1) +
+    geom_hline(yintercept = ci_lower, color = "darkgreen", linetype = "dotted") +
+    geom_hline(yintercept = ci_upper, color = "darkgreen", linetype = "dotted") +
+    labs(title = "Traceplot for beta_0",
+         subtitle = paste0("Mean = ", round(est_mean, 3),
+                           ", 95% CR = [", round(ci_lower, 3), ", ", round(ci_upper, 3), "]"),
+         y = expression(beta[0])) +
+    theme_minimal()
+  
+  # Add true value if supplied
+  if (!is.null(true_value)) {
+    p_trace <- p_trace + 
+      geom_hline(yintercept = true_value, color = "red", linetype = "solid") +
+      annotate("text", x = length(chain) * 0.8, y = true_value,
+               label = paste0("True value = ", true_value), color = "red", vjust = -1)
+  }
+  list(
+    mean = est_mean,
+    ci = c(lower = ci_lower, upper = ci_upper)
+  )
+}
+
+visualize_chain_and_compute_estimates_and_cr(extract(stan_fit)$beta_0, true_value = true_beta_0, alpha = 0.05)
+```
+
+How good was the inference on the first parameter?
+
+Very close we set true b_0 to 1.23 and we got a mean of 1.25
+
+
+```{r}
+visualize_chain_and_compute_estimates_and_cr(extract(stan_fit)$beta_1, true_value = true_beta_1, alpha = 0.05)
+```
+
+How good was the inference on the second parameter?
+
+also very close
+
+
+```{r}
+visualize_chain_and_compute_estimates_and_cr(extract(stan_fit)$r, true_value = true_r, alpha = 0.05)
+```
+
+How good was the inference on the third parameter (the nuisance r)?
+
+Pretty off
+
+
+## Problem 2: Bayesian Inference for the Weibull using Hamiltonian MCMC with the no U-Turn Sampler via Stan
+
+Below is the code from the class demo to fit the Weibull model and perform frequentist inference:
+
+```{r}
+rm(list = ls())
+pacman::p_load(survival)
+
+#load the lung data set
+lung = na.omit(survival::lung)
+lung$status = lung$status - 1 #needs to be 0=alive, 1=dead
+surv_obj = Surv(lung$time, lung$status)
+weibull_freq_inf_summary = summary(survreg(surv_obj ~ . - time - status, lung))
+```
+We also generate a summary table with 95\% CI's and pvals:
+
+```{r}
+pacman::p_load(data.table)
+weibull_freq_inf_summary_table = data.table(round(cbind(
+  estimate =          weibull_freq_inf_summary$table[, 1],
+  ci_95_low =         weibull_freq_inf_summary$table[, 1] - 1.96 * weibull_freq_inf_summary$table[, 2],
+  ci_95_high =        weibull_freq_inf_summary$table[, 1] + 1.96 * weibull_freq_inf_summary$table[, 2],
+  pval_H0_no_effect = weibull_freq_inf_summary$table[, 4]
+), 4))
+weibull_freq_inf_summary_table[, variable :=     rownames(weibull_freq_inf_summary$table)]
+weibull_freq_inf_summary_table[, significance := ifelse(pval_H0_no_effect < 0.001, "***", ifelse(pval_H0_no_effect < 0.01, "**", ifelse(pval_H0_no_effect < 0.05, "*", "")))]
+setcolorder(weibull_freq_inf_summary_table, "variable")
+weibull_freq_inf_summary_table
+```
+
+
+We will now do the same inference using Stan. As it's Bayesian, we need to assume a prior so assume Laplace's prior to keep things simple.
+
+First create the data passed to stan. Hint: for the covariates, use a model matrix and don't forget the censoring vector:
+
+```{r}
+X = model.matrix(~ . - time - status, data = lung)
+
+# Construct the full data list for Stan
+stan_model_data = list(
+  n = nrow(lung),               # number of observations
+  p = ncol(X),                  # number of predictors (including intercept)
+  X = X,                        # covariate matrix
+  y = lung$time,                # observed time
+  cens = lung$status            # censoring vector (1 = death, 0 = censored)
+)
+
+```
+Now we write the relevant stan code below as a string (no need for a separate .stan file). The data block should mirror the `stan_model_data` above.  For the parameters block, you'll need your notes; don't forget the `k` (the Weibull modulus). For the model block, you'll need the log of the posterior's kernel from your notes on the class where we discussed glm's.
+
+```{r}
+# 1. Load packages
+rm(list = ls())
+pacman::p_load(rstan, survival)
+
+# 2. Prepare data
+lung = na.omit(survival::lung)
+lung$status = lung$status - 1  # make it 0 = censored, 1 = event
+
+X = model.matrix(~ . - time - status, data = lung)
+stan_model_data = list(
+  n = nrow(lung),
+  p = ncol(X),
+  X = X,
+  y = lung$time,
+  cens = lung$status
+)
+
+stan_model_code = "
+  data {
+    int<lower=0> n;                   
+    int<lower=1> p;                   
+    matrix[n, p] X;                   
+    vector[n] y;                      
+    int<lower=0, upper=1> cens[n];    
+  }
+  
+  parameters {
+    vector[p] beta;                  
+    real<lower=0> k;                 
+  }
+  
+  model {
+    vector[n] mu;
+    mu = exp(-X * beta);             
+
+    target += -sum(fabs(beta));      
+
+    for (i in 1:n) {
+      if (cens[i] == 1) {
+        target += log(k) + log(mu[i]) + (k - 1) * log(y[i]) - mu[i] * pow(y[i], k);
+      } else {
+        target += -mu[i] * pow(y[i], k);
+      }
+    }
+  }
+"
+```
+
+
+Now we sample the model using a seed so the results will be the same for all students:
+
+```{r}
+stan_mod_obj = stan_model(model_code = stan_model_code)
+
+stan_fit = sampling(
+  stan_mod_obj,
+  seed = 1,
+  data = stan_model_data,
+  iter = 5000
+)
+```
+
+Create a table like the Frequentist inference summary table with estimates, 95\% CR's, pvals and significance indicators.
+
+```{r}
+library(data.table)
+library(rstan)
+
+# Extract posterior samples
+post = rstan::extract(stan_fit)
+
+# Get summary statistics of beta parameters
+sum_tab = summary(stan_fit, pars = "beta", probs = c(0.025, 0.975))$summary
+
+# Turn into a data.table and label variables
+bayes_summary = as.data.table(sum_tab)
+bayes_summary[, variable := paste0("beta_", seq_len(.N))]
+
+# Compute Bayesian two-sided pseudo p-values
+bayes_summary[, pval_H0_no_effect := 2 * pmin(
+  colMeans(post$beta > 0),
+  colMeans(post$beta < 0)
+)]
+
+# Add significance stars
+bayes_summary[, significance := fifelse(pval_H0_no_effect < 0.001, "***",
+                                fifelse(pval_H0_no_effect < 0.01, "**",
+                                fifelse(pval_H0_no_effect < 0.05, "*",
+                                fifelse(pval_H0_no_effect < 0.1, ".", ""))))]
+
+# Round and reorder
+bayes_summary = bayes_summary[, .(
+  variable,
+  estimate = round(mean, 4),
+  ci_95_low = round(`2.5%`, 4),
+  ci_95_high = round(`97.5%`, 4),
+  pval_H0_no_effect = round(pval_H0_no_effect, 4),
+  significance
+)]
+
+# Print result
+print(bayes_summary)
+
+```
+
+How similar is the Frequentist inference to the Bayesian inference?
+
+Very similar
+
+# Problem 3: Confounder / Lurking Variable
+
+Consider the following subset of the diamonds data with the following variables of interest:
+
+```{r}
+rm(list = ls())
+set.seed(1)
+diamonds = data.table(ggplot2::diamonds)[x > 3][sample.int(.N, 5000), ]
+setnames(diamonds, c("x", "z"), c("x_dim_size", "z_dim_size"))
+
+ggplot(diamonds) + geom_point(aes(x = x_dim_size, y = price))
+summary(lm(price ~ z_dim_size, diamonds))
+```
+Interpret the linear relationship coefficient between the variable z_dim_size and the response (price).
+
+Holding all other variables constant, as x_dim_size increases by one unit, the price of the diamond increases
+
+Now consider the following regression:
+
+```{r}
+summary(lm(price ~ x_dim_size + z_dim_size, diamonds))
+```
+
+Interpret the linear relationship coefficient between the variable z_dim_size and the response (price).
+
+
+
+What seemed to be the common cause of both a high z_dim_size and a high price?
+
+a high x_dim_size
+
+# Problem 3: Simpson's Paradox
+
+We will look at a very famous dataset: the Berkeley graduate school PhD admission dataset of 1973, a dataset every student of Statistics should know about. They published a paper in Science about this. You should read the abstract [here](https://www.science.org/doi/abs/10.1126/science.187.4175.398).
+
+```{r}
+rm(list = ls())
+berkeley_raw = data.frame(datasets::UCBAdmissions)
+berkeley_raw
+```
+
+We see there are four variables: Admit (binary), Gender (binary), Dept (nominal categorical) and Freq which is number of duplicates. The Dept variable is anonymized but it used to be something like "Physics", "Sociology", "Mathematics", "History", etc. We now convert this to an actual data frame, by duplicating the duplicates by row and deleting the `Freq` column to arrive at n = 4,526:
+
+```{r}
+berkeley = berkeley_raw[rep(row.names(berkeley_raw), times = berkeley_raw$Freq), ]
+rm(berkeley_raw)
+rownames(berkeley) = NULL
+berkeley$Freq = NULL
+berkeley
+```
+
+We will now code y = 1 to indicate the student was Admitted to graduate school at the department they applied to:
+
+```{r}
+berkeley$Admit = as.numeric(ifelse(berkeley$Admit == "Admitted", 1, 0))
+```
+
+Run a logistic regression where the one covariate is Dept:
+
+```{r}
+summary(glm(Admit ~ Dept, berkeley, family = "binomial"))
+```
+Would you say it is more difficult to be admitted into some Departments relative to others? Why or why not? Under what conditions is it causal?
+
+Yes it seems more difficult to get into some departments as dept F has a more negative coefficient than the other departments. This would be causual if we had controlled the variable.
+
+Run a logistic regression where the one covariate is Gender:
+
+```{r}
+summary(glm(Admit ~ Gender, berkeley, family = "binomial"))
+```
+
+If you were naive would you say Berkeley's graduate schools were sexist in 1973?
+
+Yes because it seems that women got admitted less than men
+
+Now run a logistic regression with covariates Dept and Gender:
+
+```{r}
+summary(glm(Admit ~ Gender + Dept, berkeley, family = "binomial"))
+```
+
+What is the more likely story in 1973 at Berkeley (other than them being sexist)? What is really going on? What is the name of the paradox you see if you only analyze the results in the Admit ~ Gender regression?
+
+This is a simpson's paradox. It sees that when we regress on Gender and Department, we get a different outcome of the coefficient for Female than we did when we just regressed on Gender. It is likely that Females applied to harder programs - not that the schoo is sexist (although it WAS the 70s...)
+
+# Problem 4: Collider Bias
+
+Consider the adult data from the 342 class. This data was demoed as a difficult classification problem. According to Figure 5 of [this paper](https://www.arxiv.org/pdf/2010.03933v1), they estimated a causal DAG for the adult dataset using the "PC" algorithm (see https://www.jstatsoft.org/article/view/v047i11 if you're interested). Their DAG features potential collider bias. We will investigate three variables here, `income` (the outcome that conditions the dataset) and the two covariates `relationship` (which we simplify to a variable called `is_married`) and `hours_per_week`:
+
+```{r}
+rm(list = ls())
+pacman::p_load_gh("coatless/ucidata")
+data(adult)
+adult = data.table(na.omit(adult)) #kill any observations with missingness
+adult = adult[, .(relationship, hours_per_week, income)]
+adult[, income := ifelse(income == ">50K", 1, 0)]
+adult[, is_married := ifelse(relationship %in% c("Husband", "Wife"), 1, 0)]
+adult[, relationship := NULL]
+head(adult)
+```
+
+Demonstrate that there is a strong positive correlation between y = hours_per_week and x = is_married in the entire dataset.
+
+```{r}
+cor(adult$is_married, adult$hours_per_week)
+```
+
+Demonstrate that there is a strong negative correlation between y = hours_per_week and x = is_married among those who earn more than 50K (i.e., when conditioning the data so that the variable income = 1).
+
+```{r}
+cor(adult[income == 1]$is_married, adult[income == 1]$hours_per_week)
+```
+
+What is the name of the bias that embodies the discrepancy between these two results above?
+
+Collider bias. Berkson's paradox is a specific type of collider bias which requires hours_per_week and is_married to be independent.
+
+Make up a story as to why this bias paradox occurs. It is pure speculation!
+
+Single people work more hours to get the same income as a two-person household of combined finances.
+
+
+
+# Problem 5: Experimental Design
+
+we will practice creating experimental designs on the lung cancer dataset. To do so we will drop the response (and hence the censoring) and imagine you see all these subjects at the same time.
+
+```{r}
+rm(list = ls())
+lung = na.omit(survival::lung)
+lung = lung[lung$ph.ecog < 3, ]
+lung$time = NULL
+lung$status = NULL
+lung$inst = NULL
+lung_male = lung[lung$sex == 1, ]
+lung_female = lung[lung$sex == 2, ]
+n = 160
+X = as.matrix(rbind(lung_male[1 : (n / 2), ], lung_female[1 : (n / 2), ]))
+rownames(X) = NULL
+rm(lung, lung_male, lung_female)
+head(X, 10)
+```
+
+You have p = 7 covariates for n = 160 subjects. The goal now is to randomize these subjects into pill (treatment) and placebo (control) arms. For each of the following exercises, create a matrix W of size n = 160 x R = 5,000 where each column is a randomized allocation drawn from the specific design.
+
+Create W for the completely randomized design (CRD):
+
+```{r}
+R = 5000
+Wcrd = matrix(NA, n, R)
+for (r in 1 : R){
+  Wcrd[, r] = sample(c(rep(1, n / 2), rep(0, n / 2)))
+}
+```
+
+Create W for the balanced completely randomized design (BCRD):
+
+```{r}
+Wbcrd = matrix(NA, n, R)
+for (r in 1 : R){
+  Wbcrd[, r] = sample(c(rep(1, n / 2), rep(0, n / 2)))
+}
+```
+
+We will now practice generating allocations for restricted designs.
+
+Create W for Fisher's Blocking design where we block on the covariate `sex`:
+
+```{r}
+Wblocking_sex = matrix(NA, n, R)
+ W_male = sample(c(rep(1, 40), rep(0, 40)))
+  W_female = sample(c(rep(1, 40), rep(0, 40)))
+  Wblocking_sex[, r] = c(W_male, W_female)
+
+```
+
+Create W for Fisher's Blocking design where we block on the covariate `ph.ecog`:
+
+```{r}
+Wblocking_ph_ecog = matrix(NA, n, R)
+ph_ecog_vals = X[, "ph.ecog"]
+unique_blocks = sort(unique(ph_ecog_vals))
+for (r in 1:R) {
+  W_r = numeric(n)
+  for (b in unique_blocks) {
+    idx = which(ph_ecog_vals == b)
+    n_b = length(idx)
+    W_block = sample(c(rep(1, n_b / 2), rep(0, n_b / 2)))
+    W_r[idx] = W_block
+  }
+
+  Wblocking_ph_ecog[, r] = W_r
+}
+```
+
+Create W for Fisher's Blocking design where we create B = 8 blocks on the covariate `age`:
+
+```{r}
+Wblocking_age = matrix(NA, n, R)
+age = X[, "age"]
+block_labels = cut(age, breaks = quantile(age, probs = seq(0, 1, length.out = 9)), include.lowest = TRUE, labels = FALSE)
+
+for (r in 1:R) {
+  W_r = numeric(n)
+  
+  for (b in 1:8) {
+    idx = which(block_labels == b)
+    n_b = length(idx)
+    n_treat = floor(n_b / 2)
+    n_control = n_b - n_treat
+    W_block = sample(c(rep(1, n_treat), rep(0, n_control)))
+    W_r[idx] = W_block
+  }
+  Wblocking_age[, r] = W_r
+}
+
+```
+
+Create W for Students' rerandomization design retaining only the best 1% of allocations:
+
+```{r}
+imbalance_scores = numeric(R)
+Wtemp = matrix(NA, n, R)
+
+for (r in 1:R) {
+  Wtemp[, r] = sample(c(rep(1, n / 2), rep(0, n / 2)))
+  xt = X[Wtemp[, r] == 1, ]
+  xc = X[Wtemp[, r] == 0, ]
+  
+  xtbar = colMeans(xt)
+  xcbar = colMeans(xc)
+
+  s2t = apply(xt, 2, var)
+  s2c = apply(xc, 2, var)
+  denom = s2t / (n / 2) + s2c / (n / 2)
+  score = sum(abs(xtbar - xcbar) / denom)
+  imbalance_scores[r] = score
+}
+threshold = quantile(imbalance_scores, probs = 0.01)
+idx_keep = which(imbalance_scores <= threshold)
+num_keep = length(idx_keep)
+Wrerand = matrix(NA, n, num_keep)
+for (j in 1:num_keep) {
+  Wrerand[, j] = Wtemp[, idx_keep[j]]
+}
+```
+
+Create W for the pairwise matching (PM) design. To do so, we use the nonbipartite matching algorithm from the package `nbpMatching` as below:
+
+```{r}
+X_scaled = scale(X)
+D = dist(X_scaled)  # dist returns a "dist" object
+
+pacman::p_load(nbpMatching)
+indices_pairs = as.matrix(nonbimatch(distancematrix(D))$matches[, c("Group1.Row", "Group2.Row")])
+
+Wpm = matrix(NA, n, R)
+for (r in 1:R) {
+  W_r = numeric(n)
+  for (k in 1:nrow(indices_pairs)) {
+    i = indices_pairs[k, 1]
+    j = indices_pairs[k, 2]
+    # Randomly assign one to treatment, one to control
+    treatment = sample(c(0, 1))
+    W_r[i] = treatment
+    W_r[j] = 1 - treatment
+  }
+  Wpm[, r] = W_r
+}
+```
+For the problems below define "covariate balance" as the absolute standard deviation difference in a covariate between the subjects in the two arms. Hint: the `apply` function is your friend.
+
+Demonstrate that the average covariate balance for the variable age is better in the w's from Fisher's blocking design on age than in the w's from CRD. 
+
+```{r}
+age = X[, "age"]
+balance_stat = function(w, x) {
+  abs(mean(x[w == 1]) - mean(x[w == 0]))
+}
+
+
+balance_crd = apply(Wcrd, 2, balance_stat, x = age)
+
+
+balance_blocking = apply(Wblocking_age, 2, balance_stat, x = age)
+
+mean_balance_crd = mean(balance_crd)
+mean_balance_blocking = mean(balance_blocking)
+cat("Average covariate balance (|Δ age|):\n")
+cat("- CRD:         ", round(mean_balance_crd, 4), "\n")
+cat("- Blocking age:", round(mean_balance_blocking, 4), "\n")
+```
+
+Demonstrate that the average covariate balance for all variables in the w's from Student's rerandomization design is better than in the w's from BCRD. 
+
+```{r}
+p = ncol(X)
+cov_names = colnames(X)
+balance_vector = function(w, Xmat) {
+  apply(Xmat, 2, function(xj) abs(mean(xj[w == 1]) - mean(xj[w == 0])))
+}
+
+balance_bcrd = apply(Wbcrd, 2, balance_vector, Xmat = X)
+balance_bcrd_means = colMeans(balance_bcrd)  
+balance_rerand = apply(Wrerand, 2, balance_vector, Xmat = X)
+balance_rerand_means = colMeans(balance_rerand)
+
+cat("Average covariate imbalance (mean abs diff across all covariates):\n")
+cat("- BCRD:     ", round(mean(balance_bcrd_means), 4), "\n")
+cat("- Rerand:   ", round(mean(balance_rerand_means), 4), "\n")
+```
+
+Demonstrate that the average covariate balance for all variables in the w's from the PM design is better than in the w's from Student's rerandomization design. 
+
+```{r}
+balance_vector = function(w, Xmat) {
+  apply(Xmat, 2, function(xj) abs(mean(xj[w == 1]) - mean(xj[w == 0])))
+}
+
+balance_rerand = apply(Wrerand, 2, balance_vector, Xmat = X)
+balance_rerand_means = colMeans(balance_rerand)
+
+balance_pm = apply(Wpm, 2, balance_vector, Xmat = X)
+balance_pm_means = colMeans(balance_pm)
+
+cat("Average covariate imbalance (mean abs diff across all covariates):\n")
+cat("- Rerandomization: ", round(mean(balance_rerand_means), 4), "\n")
+cat("- Pairwise Matching:", round(mean(balance_pm_means), 4), "\n")
+```
+
+# Problem 6: Fisher's Randomization Test
+
+We load up data from a sociology experiment I ran with Prof Dana Weinberg to test racism, sexism and agism in the book publishing industry (see https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0267537 if you are interested).
+
+```{r}
+rm(list = ls())
+pacman::p_load(data.table, R.utils)
+racism_sexism_agism_experimental_data = fread("racism_sexism_agism_experimental_data.csv.bz2")
+```
+
+This experiment had many different arms: race, sex, age. For the purposes of this assignment, we will be looking just at the race arm, w = `tx_author_race` which we will binarize and the response will be y = `survey_willingness_to_pay` which we will convert into numeric. The original design was the CRD as the experiment was "sequential". You have experience with the CRD in the previous problem.
+
+```{r}
+wy = racism_sexism_agism_experimental_data[, .(w = tx_author_race, y = survey_willingness_to_pay)]
+wy[, w := factor(as.numeric(ifelse(w == "White", 0, 1)))]
+wy[, y := as.numeric(sub("\\$", "", y))]
+head(wy)
+```
+
+Report the p-value for Fisher's randomization test for the strong null, i.e., H_0: y_i[w=0] = y_i[w=1] for all i. 
+
+```{r}
+w_obs = wy$w
+y = wy$y
+n = length(w_obs)
+R = 5000  # Number of permutations
+obs_diff = mean(y[w_obs == 1]) - mean(y[w_obs == 0])
+set.seed(1)
+Wcrd = replicate(R, sample(w_obs)) 
+null_dist = apply(Wcrd, 2, function(w) mean(y[w == 1]) - mean(y[w == 0]))
+
+p_value = mean(abs(null_dist) >= abs(obs_diff))
+cat("Fisher's randomization test p-value:", round(p_value, 4), "\n")
+```
